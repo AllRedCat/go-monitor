@@ -1,14 +1,20 @@
 package main
 
 import (
-	"fmt"
+	"encoding/json"
+	"log"
+	"net/http"
+	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/net"
+
+	"github.com/gorilla/websocket"
 )
 
+// Struct to hold system metrics
 type Metrics struct {
 	CPUPercent float64 `json:"cpu_percent"`
 	Memory     uint64  `json:"memory_total"`
@@ -21,16 +27,48 @@ type Metrics struct {
 	NetRecv    uint64  `json:"net_recv"`
 }
 
+// WebSocket upgrader
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
 func main() {
-	metrics, err := getMetrics()
-	if err != nil {
-		panic(err)
+	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Println("Upgrade error:", err)
+			return
+		}
+		defer conn.Close()
+
+		for {
+			metrics, err := getMetrics()
+			if err != nil {
+				log.Println("Error getting metrics:", err)
+				break
+			}
+
+			data, _ := json.Marshal(metrics)
+			err = conn.WriteMessage(websocket.TextMessage, data)
+			if err != nil {
+				log.Println("WriteMessage error:", err)
+				break
+			}
+
+			time.Sleep(3 * time.Second)
+		}
+	})
+
+	log.Println("Server started on :8080")
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		log.Fatal("ListenAndServe error:", err)
 	}
-	// Print the metrics to the console (or handle them as needed)
-	fmt.Printf("Metrics: %+v\n", metrics)
 }
 
 func getMetrics() (Metrics, error) {
+	// cpuPercents, err := cpu.Percent(500*time.Millisecond, false)
 	cpuPercents, err := cpu.Percent(0, false)
 	if err != nil {
 		return Metrics{}, err
