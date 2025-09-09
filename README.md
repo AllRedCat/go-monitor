@@ -70,6 +70,8 @@ The API exposes endpoints for system metrics, Docker management, and command exe
 
 Refer to the code in `internal/api/routes.go` and `internal/api/handlers/` for details.
 
+You can see the endpoints documentation in [routes](/API_ENDPOINTS.md)
+
 ## Contributing
 
 Contributions are welcome! Please open issues or submit pull requests for improvements or new features.
