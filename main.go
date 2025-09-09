@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os/exec"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/docker"
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/net"
 
@@ -28,6 +30,11 @@ type Metrics struct {
 	NetRecv     uint64  `json:"net_recv"`
 }
 
+type CPUUsage struct {
+	GeneralPercent float64   `json:"general_percent"`
+	EachPercent    []float64 `json:"each_percent"`
+}
+
 type CPUInfo struct {
 	CPUI        int32   `json:"cpu"`
 	SteppingI   int32   `json:"stepping"`
@@ -40,6 +47,11 @@ type CPUInfo struct {
 	MicrocodeI  string  `json:"microencode"`
 }
 
+// Structure for the request body in "/exec"
+type RequestPath struct {
+	Path string `json:"path"`
+}
+
 // WebSocket upgrader
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
@@ -50,8 +62,13 @@ var upgrader = websocket.Upgrader{
 func main() {
 	// Route to get machine info
 	http.HandleFunc("/info", func(w http.ResponseWriter, r *http.Request) {
+		// Check if the Method it's GET
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		info, err := getMachineInfo() // Call function to get system info
-		// Check if a error appears
+		// Check if an error appears
 		if err != nil {
 			log.Println("Error getting info:", err)
 			json.NewEncoder(w).Encode(err)
@@ -61,9 +78,103 @@ func main() {
 		json.NewEncoder(w).Encode(info)
 	})
 
-	// Route to test get CPU usage info
-	http.HandleFunc("/cpu", func(w http.ResponseWriter, r *http.Request) {
-		
+	http.HandleFunc("/docker", func(w http.ResponseWriter, r *http.Request) {
+		// Check if the Method it's GET
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		doc, err := getContainers() // Cal function to get containers info
+		// Check if an error appears
+		if err != nil {
+			log.Println("Error getting dockers:", err)
+			json.NewEncoder(w).Encode(err)
+			return
+		}
+
+		// If there are no containers, returns success with code 204 (no content)
+		if len(doc) == 0 {
+			// http.Error(w, "Not found", http.StatusNotFound)
+			w.WriteHeader(204)
+			return
+		}
+
+		// Return a JSON with containers info
+		json.NewEncoder(w).Encode(doc)
+	})
+
+	http.HandleFunc("/exec", func(w http.ResponseWriter, r *http.Request) {
+		// Check if the Method it's POST
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Check if there is a body
+		if r.Body == http.NoBody {
+			http.Error(w, "A body is required", http.StatusBadRequest)
+			return
+		}
+
+		// Variable to allocate the path recived in the request body
+		var req RequestPath
+		// Verify that the body has been successfully translated to JSON
+		err := json.NewDecoder(r.Body).Decode(&req)
+		if err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Verify if body have "scriptPath"
+		if req.Path == "" {
+			http.Error(w, `"path" is required`, http.StatusBadRequest)
+			return
+		}
+
+		// Exec the script
+		cmd := exec.Command("bash", req.Path)
+		output, err := cmd.CombinedOutput()
+
+		// Build a response
+		resp := map[string]interface{}{
+			"output": string(output),
+			"error":  nil,
+		}
+
+		// Get a possible error
+		if err != nil {
+			resp["error"] = err.Error()
+		}
+
+		// Set the response headers
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	http.HandleFunc("/ws/cpu", func(w http.ResponseWriter, r *http.Request) {
+		connect, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Println("Error: ", err)
+			return
+		}
+		defer connect.Close()
+
+		for {
+			cpuUsage, err := getCpuUsage()
+			if err != nil {
+				log.Println("Error getting usage:", err)
+				break
+			}
+
+			data, _ := json.Marshal(cpuUsage)
+			err = connect.WriteMessage(websocket.TextMessage, data)
+			if err != nil {
+				log.Println("WriterMessage error:", err)
+				break
+			}
+
+			time.Sleep(3 * time.Second)
+		}
 	})
 
 	// WebSocket to get metrics with a time of 3 seconds
@@ -76,13 +187,11 @@ func main() {
 		defer conn.Close()
 
 		for {
-			log.Println("Request from:", r.RemoteAddr)
 			metrics, err := getMetrics()
 			if err != nil {
 				log.Println("Error getting metrics:", err)
 				break
 			}
-			log.Println("Metrics:", metrics)
 
 			data, _ := json.Marshal(metrics)
 			err = conn.WriteMessage(websocket.TextMessage, data)
@@ -126,8 +235,7 @@ func getMachineInfo() ([]CPUInfo, error) {
 }
 
 func getMetrics() (Metrics, error) {
-	// cpuPercents, err := cpu.Percent(500*time.Millisecond, false)
-	cpuPercents, err := cpu.Percent(0, false)
+	cpuPercents, err := cpu.Percent(1000*time.Millisecond, false)
 	if err != nil {
 		return Metrics{}, err
 	}
@@ -163,4 +271,33 @@ func getMetrics() (Metrics, error) {
 	}
 
 	return metrics, nil
+}
+
+func getCpuUsage() (CPUUsage, error) {
+	g, err := cpu.Percent(1000*time.Millisecond, false)
+	if err != nil {
+		return CPUUsage{}, err
+	}
+	percent := g[0]
+
+	e, err := cpu.Percent(1000*time.Millisecond, true)
+	if err != nil {
+		return CPUUsage{}, err
+	}
+
+	data := CPUUsage{
+		GeneralPercent: percent,
+		EachPercent:    e,
+	}
+
+	return data, nil
+}
+
+func getContainers() ([]docker.CgroupDockerStat, error) {
+	d, err := docker.GetDockerStat()
+	if err != nil {
+		return nil, err
+	}
+
+	return d, nil
 }
