@@ -1,3 +1,4 @@
+// Package handlers
 package handlers
 
 import (
@@ -34,7 +35,6 @@ func ExecHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp, err := services.RunScript(req)
-
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

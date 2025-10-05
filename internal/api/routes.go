@@ -1,8 +1,10 @@
+// Package api
 package api
 
 import (
-	"monitor/internal/api/handlers"
 	"net/http"
+
+	"monitor/internal/api/handlers"
 )
 
 func NewRouter() *http.ServeMux {
